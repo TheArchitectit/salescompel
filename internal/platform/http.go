@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"salescompel/internal/metadata"
 	"salescompel/internal/query"
 	"salescompel/internal/records"
 	"strings"
@@ -35,6 +36,7 @@ func writeError(w http.ResponseWriter, err error) {
 func body(r *http.Request) (map[string]any, error) {
 	data := map[string]any{}
 	dec := json.NewDecoder(r.Body)
+	dec.UseNumber()
 	start, err := dec.Token()
 	if err != nil || start != json.Delim('{') {
 		return nil, invalid("JSON_PARSER_ERROR", "Expected a JSON object")
@@ -189,7 +191,9 @@ func NewHandlerWithOptions(s *Store, assetDir string, o Options) http.Handler {
 			if method(w, r, "GET") {
 				w.Header().Set("Content-Type", apicontract.CandidateOpenAPIContentType)
 				w.WriteHeader(http.StatusOK)
-				_, _ = io.WriteString(w, apicontract.CandidateOpenAPI())
+				if _, wErr := io.WriteString(w, apicontract.CandidateOpenAPI()); wErr != nil {
+					return
+				}
 			}
 			return
 		}
@@ -272,6 +276,10 @@ func NewHandlerWithOptions(s *Store, assetDir string, o Options) http.Handler {
 				writeJSON(w, 200, map[string]any{"totalSize": 1, "done": true, "records": []any{map[string]any{"Name": p.Tenant, "InstanceName": nil, "IsSandbox": false, "TrialExpirationDate": nil, "NamespacePrefix": nil, "OrganizationType": "SalesCompel"}}})
 				return
 			}
+			if isCurrencyDiscovery(r.URL.Query().Get("q")) {
+				writeJSON(w, 200, map[string]any{"totalSize": 1, "done": true, "records": []any{map[string]any{"attributes": map[string]any{"type": "Organization"}, "DefaultCurrencyIsoCode": catalog.Currency}}})
+				return
+			}
 			q, e := ParseQuery(r.URL.Query().Get("q"))
 			if e != nil {
 				writeError(w, e)
@@ -304,6 +312,25 @@ func NewHandlerWithOptions(s *Store, assetDir string, o Options) http.Handler {
 			writeJSON(w, 200, result)
 			return
 		}
+		if parts[0] == "candidate" && len(parts) == 4 && parts[1] == "sobjects" && parts[3] == "storedFields" {
+			// Candidate-only: stored-not-enforced definitions are never described.
+			if !method(w, r, "GET") {
+				return
+			}
+			definition, lookupErr := catalog.Object(parts[2])
+			if lookupErr != nil {
+				writeError(w, problem(404, "NOT_FOUND", "Object not found"))
+				return
+			}
+			stored := []metadata.StoredField{}
+			for _, sf := range catalog.Stored {
+				if sf.Object == definition.Name {
+					stored = append(stored, sf)
+				}
+			}
+			writeJSON(w, 200, map[string]any{"storedFields": stored})
+			return
+		}
 		if parts[0] != "sobjects" {
 			writeError(w, problem(404, "NOT_FOUND", "Resource not implemented by this candidate"))
 			return
@@ -314,7 +341,11 @@ func NewHandlerWithOptions(s *Store, assetDir string, o Options) http.Handler {
 			}
 			objects := []Object{}
 			for _, object := range catalog.Objects {
-				d, _ := records.Describe(p, object.Name)
+				d, dErr := records.Describe(p, object.Name)
+				if dErr != nil {
+					writeError(w, problem(500, "INTERNAL_ERROR", "Describe failed"))
+					return
+				}
 				objects = append(objects, d)
 			}
 			writeJSON(w, 200, map[string]any{"sobjects": objects, "encoding": "UTF-8", "maxBatchSize": 1})
@@ -328,7 +359,11 @@ func NewHandlerWithOptions(s *Store, assetDir string, o Options) http.Handler {
 		}
 		if len(parts) == 3 && parts[2] == "describe" {
 			if method(w, r, "GET") {
-				d, _ := records.Describe(p, object)
+				d, dErr := records.Describe(p, object)
+				if dErr != nil {
+					writeError(w, problem(500, "INTERNAL_ERROR", "Describe failed"))
+					return
+				}
 				writeJSON(w, 200, d)
 			}
 			return
