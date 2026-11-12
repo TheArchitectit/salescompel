@@ -6,13 +6,13 @@ export default defineConfig({
         outputDir: process.env.CANDIDATE_BROWSER_OUTPUT,
         reporter: [
           ["json", { outputFile: process.env.CANDIDATE_BROWSER_REPORT }],
-        ] as any,
+        ] as unknown as [string, Record<string, unknown>][],
       }
     : {}),
   testDir: "./test",
   testMatch: process.env.CANDIDATE_OAUTH_AUTHORIZE_URL
     ? "oauth-login.spec.ts"
-    : ["records.spec.ts", "dynamic-schema.spec.ts"],
+    : ["records.spec.ts", "dynamic-schema.spec.ts", "field-types.spec.ts"],
   workers: 1,
   retries: 0,
   use: {

@@ -2,11 +2,10 @@ package records
 
 import (
 	"salescompel/internal/contract"
+	"salescompel/internal/fieldtype"
 	"salescompel/internal/metadata"
 	"salescompel/internal/policy"
 	"sort"
-	"strings"
-	"unicode/utf8"
 )
 
 type Principal = policy.Principal
@@ -27,15 +26,16 @@ func Describe(p Principal, object string) (Object, error) {
 	if !ok {
 		return Object{}, invalid("INVALID_TYPE", "Unsupported object")
 	}
-	d, _ := p.Catalog.Object(object)
+	d, oErr := p.Catalog.Object(object)
+	if oErr != nil {
+		return Object{}, invalid("INVALID_TYPE", "Unsupported object")
+	}
 	d.Fields = []Field{}
 	for _, f := range fields {
 		if allowed(p, d.Name, f.Name) {
 			if f.Label == "" {
 				f.Label = f.Name
 			}
-			f.Createable = f.Name != "Id"
-			f.Updateable = f.Createable
 			if f.ReferenceTo == nil {
 				f.ReferenceTo = []string{}
 			}
@@ -62,26 +62,22 @@ func Validate(p Principal, object string, data map[string]any, create bool) erro
 		if f.Name == "Id" {
 			return fieldProblem("INVALID_FIELD_FOR_INSERT_UPDATE", "Id is read only", "Id")
 		}
+		if (create && !f.Createable) || (!create && !f.Updateable) {
+			return fieldProblem("INVALID_FIELD_FOR_INSERT_UPDATE", "Field is not writable", f.Name)
+		}
 		if v == nil {
-			if !f.Nillable {
+			if !f.Nillable && f.Kind() != fieldtype.Checkbox {
 				return fieldProblem("REQUIRED_FIELD_MISSING", "Required value is missing", f.Name)
 			}
 			continue
 		}
-		s, ok := v.(string)
-		if !ok {
-			return fieldProblem("JSON_PARSER_ERROR", "Expected a string or null", f.Name)
-		}
-		if !f.Nillable && strings.TrimSpace(s) == "" {
-			return fieldProblem("REQUIRED_FIELD_MISSING", "Required value is missing", f.Name)
-		}
-		if !utf8.ValidString(s) || strings.ContainsRune(s, 0) || utf8.RuneCountInString(s) > f.Length {
-			return fieldProblem("STRING_TOO_LONG", "Invalid or oversized field value", f.Name)
+		if _, _, err := coerce(f, v); err != nil {
+			return err
 		}
 	}
 	if create {
 		for _, f := range fieldsFor(p, object) {
-			if f.Name != "Id" && !f.Nillable {
+			if f.Name != "Id" && !f.Nillable && f.Createable && f.Kind() != fieldtype.Checkbox {
 				if v, ok := data[f.Name]; !ok || v == nil {
 					return fieldProblem("REQUIRED_FIELD_MISSING", "Required value is missing", f.Name)
 				}
@@ -98,7 +94,13 @@ func catalogFields(p Principal, object string) ([]Field, bool) {
 	}
 	return nil, false
 }
-func fieldsFor(p Principal, object string) []Field { f, _ := catalogFields(p, object); return f }
+func fieldsFor(p Principal, object string) []Field {
+	f, ok := catalogFields(p, object)
+	if !ok {
+		return nil
+	}
+	return f
+}
 func canonicalObject(p Principal, input string) (string, bool) {
 	if p.Catalog != nil {
 		o, e := p.Catalog.Object(input)
